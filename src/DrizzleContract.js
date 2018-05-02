@@ -1,26 +1,28 @@
 class DrizzleContract {
-  constructor(contractArtifact, web3, store, events = []) {
+  constructor(contractArtifact, web3, store, events = [], fallback, network) {
     this.contractArtifact = contractArtifact
     this.abi = contractArtifact.abi
     this.web3 = web3
     this.store = store
 
-    var networkId = 0
-
     this.initContractState();
 
     // Instantiate the contract.
-    web3.eth.net.getId()
+    return this.web3.eth.net.getId()
     .then((networkId) => {
-      var web3Contract = new web3.eth.Contract(
+      let web3Instance = this.web3;
+      // if current Metamaks network doesn't match our default network, use fallback
+      // to get contract params (contract functions will not be usable)
+      // logging in/out of metamask requires a re-load (doesn't happen right now)
+      if (network !== networkId) web3Instance = fallback;
+      var web3Contract = new web3Instance.eth.Contract(
         this.abi,
-        this.contractArtifact.networks[networkId].address,
+        this.contractArtifact.networks[4].address,
         {
           from: this.store.getState().accounts[0],
           data: this.contractArtifact.deployedBytecode
         }
       )
-
 
       // Merge web3 contract instance into DrizzleContract instance.
       Object.assign(this, web3Contract)
@@ -52,13 +54,13 @@ class DrizzleContract {
       const address = this._address
       store.dispatch({type: 'CONTRACT_INITIALIZED', name, methods, address})
 
-      return networkId
+      return this
     })
     .catch((error) => {
       console.error('Error retrieving network ID:')
       console.error(error)
-
-      return
+      throw error;
+      // return null;
     })
   }
 

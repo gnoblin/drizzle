@@ -12,6 +12,7 @@ class Drizzle {
     this.initialized = false
     this.store = store
     this.web3 = {}
+    this.networkId = options.networkId;
 
     // Function Bindings
     this.getWeb3 = this.getWeb3.bind(this)
@@ -106,20 +107,21 @@ class Drizzle {
    * setInterval is unfortunately still the best way to detect account changes
    */
   watchAccounts() {
-    var web3 = this.metamaskWeb3 || this.web3
+    var web3 = this.metamaskWeb3 || this.web3;
     var accountInterval = setInterval(async () => {
       let state = this.store.getState()
       let accounts = state.accounts;
       let newAccounts = await web3.eth.getAccounts()
+      if (!newAccounts[0]) newAccounts[0] = undefined;
       if (newAccounts[0] !== accounts[0]) {
-        await new Promise((resolve, reject) => {
-          this.store.dispatch({type: 'ACCOUNTS_FETCHING', web3, resolve, reject})
-        })
+        this.store.dispatch({type: 'ACCOUNTS_FETCHED', accounts: newAccounts});
         state = this.store.getState()
         accounts = state.accounts;
-        this.store.dispatch({type: 'GET_BALANCES', web3, accounts})
+        this.store.dispatch({type: 'ACCOUNT_BALANCES_FETCHING', web3})
+        // re-initialize and re-sync contracts
+        this.getContracts();
       }
-    }, 300);
+    }, 1000);
   }
 
   watchNetwork() {
@@ -138,40 +140,54 @@ class Drizzle {
   getContracts() {
     var store = this.store
     var web3 = this.metamaskWeb3 || this.web3
+    var fallback = this.web3
+    var network = this.networkId;
+
+    if (this.blockObserver) this.blockObserver.unsubscribe()
 
     // Get all JSON artifacts passed in by user, instantiating and storing each contract.
-    for (var i = 0; i < this.options.contracts.length; i++)
-    {
-      const contractArtifact = this.options.contracts[i]
+    var initializedContracts = this.options.contracts.map(async contractArtifact => {
       const events = contractArtifact.contractName in this.options.events ? this.options.events[contractArtifact.contractName] : []
 
-      this.contracts[contractArtifact.contractName] = new DrizzleContract(contractArtifact, web3, store, events)
+      return this.contracts[contractArtifact.contractName] = await new DrizzleContract(
+        contractArtifact,
+        web3,
+        store,
+        events,
+        fallback,
+        network,
+      )
+    })
+
+    Promise.all(initializedContracts)
+    .then(this.observeBlocks)
+    .catch(err => {
+      console.log('Some contracts failed to initialize')
+    })
+  }
+
+  syncAll() {
+    let web3 = this.web3
+    var contractAddresses = []
+    var contractNames = []
+    var accountAddresses = Object.values(state.accounts);
+
+    // Collect contract addresses in an array for later comparison in txs.
+    for (var contract in this.contracts)
+    {
+      contractNames.push(this.contracts[contract].contractArtifact.contractName)
     }
 
-    // Wait until all contracts are intialized before observing changes
-    this.readytoObserve = store.subscribe(() => {
-      const state = store.getState()
-      var initializedContracts = 0
+    contractNames.forEach(contractName => {
+      this.store.dispatch({type: 'CONTRACT_SYNCING', contract: this.contracts[contractName]})
+    })
 
-      for (var contract in state.contracts)
-      {
-        if (state.contracts[contract].initialized === true)
-        {
-          initializedContracts++
-
-          if (initializedContracts === Object.keys(state.contracts).length)
-          {
-            // All contracts are initialized, we can begin observing changes
-            this.observeBlocks()
-          }
-        }
-      }
+    accountAddresses.forEach(account => {
+      this.store.dispatch({ type: 'GET_ACCOUNT_BALANCE', account, web3 })
     })
   }
 
   observeBlocks() {
-    // Cancels our store subscription.
-    this.readytoObserve()
     let web3 = this.web3
 
     this.store.dispatch({type: 'DRIZZLE_INITIALIZED', drizzleInstance: this })
@@ -189,9 +205,8 @@ class Drizzle {
       contractAddresses.push(this.contracts[contract].options.address)
     }
 
-    // TODO reconnection logic
     // Observe new blocks and re-sync contracts.
-    this.web3.eth.subscribe('newBlockHeaders', (error, result) => {
+    this.blockObserver = this.web3.eth.subscribe('newBlockHeaders', (error, result) => {
       if (error)
       {
         console.error('Error in block header subscription:')
@@ -233,6 +248,11 @@ class Drizzle {
         .catch((error) => {
           console.error('Error in block fetching:')
           console.error(error)
+          // try to subscribe again after a timeout
+          setTimeout(() => {
+            this.syncAll();
+            if (this.blockObserver) this.blockObserver.subscribe()
+          }, 1000);
         })
       }
     })

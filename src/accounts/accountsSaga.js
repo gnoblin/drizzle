@@ -11,6 +11,7 @@ function* callGetAccounts(action) {
 
   if (!accounts) {
     console.error('No accounts found!')
+    yield put({type: 'ACCOUNTS_FETCHED', accounts: []})
     yield call(action.reject, {source: 'accounts', message: 'Failed to get accounts.'})
   }
 
